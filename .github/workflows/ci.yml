@@ -1,0 +1,200 @@
+---
+name: CI Pipeline
+
+# Requisito da Tarefa 07: executar automaticamente a cada push na main.
+# O pull_request e o workflow_dispatch entram como apoio.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Token somente-leitura por padrao; so o job de publicacao pede escrita.
+permissions:
+  contents: read
+
+# Um push novo cancela a execucao anterior do mesmo ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  qualidade:
+    name: Qualidade (ESLint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Obter o codigo
+        uses: actions/checkout@v4
+
+      - name: Preparar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Instalar dependencias
+        run: npm install
+
+      - name: Rodar ESLint
+        run: npm run lint
+
+  # Os tres jobs abaixo sao o coracao da tarefa: cada tipo de teste roda
+  # isolado, com sua propria configuracao do Vitest e seu proprio relatorio.
+  # Rodam em paralelo e nao usam `fail-fast`, entao uma falha no unitario
+  # nao esconde o resultado dos outros dois.
+
+  teste-unitario:
+    name: Testes unitarios
+    needs: qualidade
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Instalar dependencias
+        run: npm install
+
+      - name: Executar testes unitarios
+        run: npm run test:unit
+
+      - name: Apresentar o resultado no resumo
+        if: always()
+        run: |
+          node scripts/resumo-testes.mjs reports/unit.xml \
+            --titulo="Testes unitarios" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Guardar o relatorio JUnit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relatorio-unitario
+          path: reports/unit.xml
+          retention-days: 7
+
+  teste-integracao:
+    name: Testes de integracao
+    needs: qualidade
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Instalar dependencias
+        run: npm install
+
+      - name: Executar testes de integracao
+        run: npm run test:integration
+
+      - name: Apresentar o resultado no resumo
+        if: always()
+        run: |
+          node scripts/resumo-testes.mjs reports/integration.xml \
+            --titulo="Testes de integracao" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Guardar o relatorio JUnit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relatorio-integracao
+          path: reports/integration.xml
+          retention-days: 7
+
+  teste-performance:
+    name: Testes de performance
+    needs: qualidade
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Instalar dependencias
+        run: npm install
+
+      - name: Executar testes de performance
+        run: npm run test:performance
+
+      - name: Apresentar o resultado no resumo
+        if: always()
+        run: |
+          node scripts/resumo-testes.mjs reports/performance.xml \
+            --titulo="Testes de performance" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Guardar o relatorio JUnit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relatorio-performance
+          path: reports/performance.xml
+          retention-days: 7
+
+  resultados:
+    name: Resultado consolidado
+    needs: [teste-unitario, teste-integracao, teste-performance]
+    # `always()` garante o quadro consolidado mesmo quando um dos tipos falha
+    # - e exatamente nesse caso que ele mais serve.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Baixar os relatorios dos tres tipos
+        uses: actions/download-artifact@v4
+        with:
+          path: baixados
+          pattern: relatorio-*
+          merge-multiple: false
+
+      - name: Juntar os relatorios numa pasta so
+        run: |
+          mkdir -p reports
+          find baixados -name '*.xml' -exec cp {} reports/ \;
+          ls -l reports
+
+      - name: Montar o quadro consolidado
+        run: |
+          node scripts/resumo-testes.mjs \
+            reports/unit.xml \
+            reports/integration.xml \
+            reports/performance.xml \
+            --titulo="Resultado consolidado dos tres tipos de teste" \
+            >> "$GITHUB_STEP_SUMMARY"
+
+  publicar:
+    name: Publicar a aplicacao
+    needs: [teste-unitario, teste-integracao, teste-performance]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Instalar dependencias
+        run: npm install
+
+      - name: Gerar o build de producao
+        run: npm run build
+
+      # So publica o que entrou na main; pull request roda tudo menos o deploy.
+      - name: Publicar no GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        if: github.ref == 'refs/heads/main'
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist
+          publish_branch: gh-pages
+          commit_message: "deploy: publica a aplicacao validada pela pipeline"
